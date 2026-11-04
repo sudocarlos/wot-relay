@@ -83,8 +83,6 @@ var defaultArchiveKinds = []nostr.Kind{
 
 var pool *nostr.Pool
 var db *lmdb.LMDBBackend
-var relays []string
-var relaySet = make(map[string]bool) // O(1) lookup
 var config Config
 var trustNetwork []string
 var trustNetworkSet = make(map[string]bool) // O(1) lookup
@@ -109,7 +107,6 @@ var (
 
 // Mutexes for thread safety
 var (
-	relayMutex        sync.RWMutex
 	trustNetworkMutex sync.RWMutex
 	oneHopMutex       sync.RWMutex
 	followerMutex     sync.RWMutex
@@ -605,22 +602,13 @@ func refreshTrustNetwork(ctx context.Context, relay *khatru.Relay) {
 				for ev := range pool.FetchMany(timeout, seedRelays, filter, nostr.SubscriptionOptions{}) {
 					atomic.AddInt64(&totalProcessed, 1)
 
-					hasP := false
 					followerCountMu.Lock()
 					for contact := range ev.Tags.FindAll("p") {
 						if len(contact) > 1 {
 							newPubkeyFollowerCount[contact[1]]++
-							hasP = true
 						}
 					}
 					followerCountMu.Unlock()
-					_ = hasP
-
-					for relayTag := range ev.Tags.FindAll("r") {
-						if len(relayTag) > 1 {
-							appendRelay(relayTag[1])
-						}
-					}
 
 					if ev.Kind == nostr.KindProfileMetadata {
 						if err := db.SaveEvent(ev.Event); err != nil {
@@ -650,9 +638,6 @@ func refreshTrustNetwork(ctx context.Context, relay *khatru.Relay) {
 
 		duration := time.Since(start)
 		log.Printf("🫂 total network size: %d (processed %d events in %v)", len(newPubkeyFollowerCount), atomic.LoadInt64(&totalProcessed), duration)
-		relayMutex.RLock()
-		log.Println("🔗 relays discovered:", len(relays))
-		relayMutex.RUnlock()
 
 		return eventCount
 	}
@@ -699,22 +684,6 @@ func refreshTrustNetwork(ctx context.Context, relay *khatru.Relay) {
 			return
 		}
 	}
-}
-
-func appendRelay(relay string) {
-	relayMutex.Lock()
-	defer relayMutex.Unlock()
-
-	if len(relays) >= config.MaxRelays {
-		return // Prevent unbounded growth
-	}
-
-	if relaySet[relay] {
-		return // Already exists
-	}
-
-	relays = append(relays, relay)
-	relaySet[relay] = true
 }
 
 func appendPubkey(pubkey string) {
@@ -884,10 +853,6 @@ func monitorMemoryUsage() {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
 
-		relayMutex.RLock()
-		relayCount := len(relays)
-		relayMutex.RUnlock()
-
 		trustNetworkMutex.RLock()
 		trustNetworkCount := len(trustNetwork)
 		trustNetworkMutex.RUnlock()
@@ -902,8 +867,8 @@ func monitorMemoryUsage() {
 
 		log.Printf("📊 Memory: Alloc=%d KB, Sys=%d KB, NumGC=%d",
 			m.Alloc/1024, m.Sys/1024, m.NumGC)
-		log.Printf("📊 Data structures: Relays=%d, TrustNetwork=%d, OneHop=%d, Followers=%d",
-			relayCount, trustNetworkCount, oneHopCount, followerCount)
+		log.Printf("📊 Data structures: TrustNetwork=%d, OneHop=%d, Followers=%d",
+			trustNetworkCount, oneHopCount, followerCount)
 	}
 }
 
@@ -951,10 +916,6 @@ func monitorPerformance() {
 // Debug handlers
 func debugStatsHandler(w http.ResponseWriter, r *http.Request) {
 	// writers hold these locks, so read under them
-	relayMutex.RLock()
-	relayCount := len(relays)
-	relayMutex.RUnlock()
-
 	trustNetworkMutex.RLock()
 	trustNetworkCount := len(trustNetwork)
 	trustNetworkMutex.RUnlock()
@@ -991,7 +952,6 @@ Refreshes:
   Network Refreshes: %d
 
 Data Structures:
-  Relays: %d
   Trust Network: %d
   One Hop Network: %d
   Follower Count Map: %d
@@ -1008,7 +968,6 @@ Data Structures:
 		atomic.LoadUint64(&untrustedNotes),
 		atomic.LoadUint64(&profileRefreshCount),
 		atomic.LoadUint64(&networkRefreshCount),
-		relayCount,
 		trustNetworkCount,
 		oneHopCount,
 		followerCount,
