@@ -726,6 +726,7 @@ func archiveTrustedNotes(ctx context.Context, relay *khatru.Relay) {
 			log.Println("📦 archiving trusted notes...")
 
 			eventCount := 0
+			var lastNumGC uint32
 			for ev := range pool.SubscribeMany(timeout, seedRelays, filter, nostr.SubscriptionOptions{}) {
 				eventCount++
 
@@ -733,13 +734,15 @@ func archiveTrustedNotes(ctx context.Context, relay *khatru.Relay) {
 				if eventCount%1000 == 0 {
 					var m runtime.MemStats
 					runtime.ReadMemStats(&m)
-					if m.NumGC > 0 && eventCount > 1000 {
-						gcRate := float64(m.NumGC) / float64(eventCount/1000)
-						if gcRate > 2.0 {
-							log.Printf("⚠️ High GC pressure (%.1f GC/1000 events), slowing archive process", gcRate)
+					// lastNumGC > 0 skips the first checkpoint, which only sets the baseline
+					if lastNumGC > 0 {
+						gcSinceCheck := m.NumGC - lastNumGC
+						if gcSinceCheck > 20 {
+							log.Printf("⚠️ High GC pressure (%d GC/1000 events), slowing archive process", gcSinceCheck)
 							time.Sleep(100 * time.Millisecond)
 						}
 					}
+					lastNumGC = m.NumGC
 				}
 
 				// Use semaphore to limit concurrent goroutines
